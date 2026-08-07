@@ -32,6 +32,7 @@ jobs:
           toolchain: 1.96.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
