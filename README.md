@@ -18,7 +18,7 @@ Install the latest tagged version directly from GitHub:
 
 ```sh
 cargo install --git https://github.com/awwwkshay-org/awesome-rust-templates \
-  --tag v0.1.0 --locked --package awesome-rust-templates
+  --tag v0.2.0 --locked --package awesome-rust-templates
 ```
 
 This installs the `art` binary in Cargo's binary directory. Tagged GitHub
@@ -55,12 +55,14 @@ art --init
 The CLI will show the available templates and ask for the project name and Git
 initialization preference.
 
-The generator embeds `templates/fullstack-mono`, so an installed binary does
-not need this checkout when creating a project. After customizing the Cargo
-manifests, it runs `cargo generate-lockfile` so `Cargo.lock` always matches the
-generated package names and dependency declarations. Pass a path after `--init`
-to choose another directory, and use `--no-git` to skip Git initialization.
-Existing files are never overwritten.
+The generator downloads the template asset matching its own version from the
+project's GitHub release, verifies its SHA-256 checksum, and caches it in the
+operating system's standard cache directory. The first use requires network
+access; later projects using the same version work from the cache. After
+customizing the Cargo manifests, it runs `cargo generate-lockfile` so
+`Cargo.lock` always matches the generated package names and dependency
+declarations. Pass a path after `--init` to choose another directory, and use
+`--no-git` to skip Git initialization. Existing files are never overwritten.
 
 ## Validate
 

@@ -8,9 +8,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 
-const FULLSTACK_TEMPLATE: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/fullstack-mono.tar.gz"));
+const RELEASE_REPOSITORY: &str = "awwwkshay-org/awesome-rust-templates";
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Template {
@@ -24,9 +24,9 @@ impl Template {
         }
     }
 
-    fn archive(self) -> &'static [u8] {
+    fn asset_name(self) -> &'static str {
         match self {
-            Self::FullstackMono => FULLSTACK_TEMPLATE,
+            Self::FullstackMono => "fullstack-mono",
         }
     }
 }
@@ -69,10 +69,18 @@ fn main() -> Result<()> {
 }
 
 fn create_from_args(args: &Args) -> Result<()> {
-    create_from_args_with_lockfile(args, true)
+    let template = args
+        .template
+        .context("a template is required; pass --template or run art --init interactively")?;
+    let archive = load_template(template)?;
+    create_from_args_with_archive(args, &archive, true)
 }
 
-fn create_from_args_with_lockfile(args: &Args, should_generate_lockfile: bool) -> Result<()> {
+fn create_from_args_with_archive(
+    args: &Args,
+    archive: &[u8],
+    should_generate_lockfile: bool,
+) -> Result<()> {
     let template = args
         .template
         .context("a template is required; pass --template or run art --init interactively")?;
@@ -101,7 +109,7 @@ fn create_from_args_with_lockfile(args: &Args, should_generate_lockfile: bool) -
     if let Err(error) = scaffold(
         project_name,
         &destination,
-        template.archive(),
+        archive,
         !args.no_git,
         should_generate_lockfile,
     ) {
@@ -117,6 +125,84 @@ fn create_from_args_with_lockfile(args: &Args, should_generate_lockfile: bool) -
         destination.display()
     );
     Ok(())
+}
+
+fn load_template(template: Template) -> Result<Vec<u8>> {
+    let version = env!("CARGO_PKG_VERSION");
+    let asset = format!("{}-v{version}.tar.gz", template.asset_name());
+    let cache = dirs::cache_dir()
+        .context("could not determine the operating system cache directory")?
+        .join("art")
+        .join(version);
+    let archive_path = cache.join(&asset);
+    let checksum_path = cache.join(format!("{asset}.sha256"));
+
+    if archive_path.is_file() && checksum_path.is_file() {
+        let archive = fs::read(&archive_path)
+            .with_context(|| format!("failed to read {}", archive_path.display()))?;
+        let checksum = fs::read_to_string(&checksum_path)
+            .with_context(|| format!("failed to read {}", checksum_path.display()))?;
+        if verify_checksum(&archive, &checksum).is_ok() {
+            return Ok(archive);
+        }
+    }
+
+    fs::create_dir_all(&cache)
+        .with_context(|| format!("failed to create template cache at {}", cache.display()))?;
+    let release = format!("https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}");
+    println!("Downloading template {asset}...");
+    let checksum = download(&format!("{release}/{asset}.sha256"))?;
+    let checksum = String::from_utf8(checksum).context("template checksum is not valid UTF-8")?;
+    let archive = download(&format!("{release}/{asset}"))?;
+    verify_checksum(&archive, &checksum)?;
+
+    let archive_download = cache.join(format!("{asset}.download"));
+    let checksum_download = cache.join(format!("{asset}.sha256.download"));
+    fs::write(&archive_download, &archive)
+        .with_context(|| format!("failed to write {}", archive_download.display()))?;
+    fs::write(&checksum_download, &checksum)
+        .with_context(|| format!("failed to write {}", checksum_download.display()))?;
+    fs::rename(&archive_download, &archive_path)
+        .with_context(|| format!("failed to cache {}", archive_path.display()))?;
+    fs::rename(&checksum_download, &checksum_path)
+        .with_context(|| format!("failed to cache {}", checksum_path.display()))?;
+    Ok(archive)
+}
+
+fn download(url: &str) -> Result<Vec<u8>> {
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("failed to download {url}"))?;
+    response
+        .into_body()
+        .read_to_vec()
+        .with_context(|| format!("failed to read {url}"))
+}
+
+fn verify_checksum(archive: &[u8], checksum_file: &str) -> Result<()> {
+    let expected = checksum_file
+        .split_whitespace()
+        .next()
+        .context("template checksum file is empty")?;
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("template checksum file contains an invalid SHA-256 digest");
+    }
+    let actual = sha256_hex(archive);
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("downloaded template failed SHA-256 verification");
+    }
+    Ok(())
+}
+
+fn sha256_hex(contents: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(contents);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
 }
 
 fn resolve_args<R: BufRead, W: Write>(
@@ -196,7 +282,7 @@ fn scaffold(
     let decoder = GzDecoder::new(Cursor::new(template));
     tar::Archive::new(decoder)
         .unpack(destination)
-        .context("failed to unpack the embedded template")?;
+        .context("failed to unpack the downloaded template")?;
     customize(name, destination)?;
     if should_generate_lockfile {
         generate_lockfile(destination)?;
@@ -221,13 +307,13 @@ fn ensure_no_conflicts(name: &str, destination: &Path, template: &[u8]) -> Resul
     let decoder = GzDecoder::new(Cursor::new(template));
     for entry in tar::Archive::new(decoder)
         .entries()
-        .context("failed to inspect the embedded template")?
+        .context("failed to inspect the downloaded template")?
     {
-        let entry = entry.context("failed to inspect an embedded template entry")?;
+        let entry = entry.context("failed to inspect a downloaded template entry")?;
         if entry.header().entry_type().is_file() {
             let path = entry
                 .path()
-                .context("embedded template contains an invalid path")?;
+                .context("downloaded template contains an invalid path")?;
             let target = destination.join(path.as_ref());
             if target.exists() {
                 bail!("refusing to overwrite existing file: {}", target.display());
@@ -392,6 +478,10 @@ fn human_title(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{path::Component, sync::OnceLock};
+
+    use flate2::{Compression, write::GzEncoder};
+    use walkdir::WalkDir;
 
     fn args(init: PathBuf, name: Option<&str>) -> Args {
         Args {
@@ -403,7 +493,54 @@ mod tests {
     }
 
     fn create_without_lockfile(args: &Args) -> Result<()> {
-        create_from_args_with_lockfile(args, false)
+        create_from_args_with_archive(args, test_template(), false)
+    }
+
+    fn test_template() -> &'static [u8] {
+        static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
+        ARCHIVE.get_or_init(|| {
+            let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .unwrap();
+            let template = repository.join("templates/fullstack-mono");
+            let encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            let mut archive = tar::Builder::new(encoder);
+            for entry in WalkDir::new(&template).follow_links(false) {
+                let entry = entry.unwrap();
+                let relative = entry.path().strip_prefix(&template).unwrap();
+                if relative.as_os_str().is_empty() || excluded_from_test_template(relative) {
+                    continue;
+                }
+                if entry.file_type().is_file() {
+                    archive
+                        .append_path_with_name(entry.path(), relative)
+                        .unwrap();
+                } else if entry.file_type().is_dir() {
+                    archive.append_dir(relative, entry.path()).unwrap();
+                }
+            }
+            archive.into_inner().unwrap().finish().unwrap()
+        })
+    }
+
+    fn excluded_from_test_template(path: &Path) -> bool {
+        if path == Path::new("Cargo.lock") {
+            return true;
+        }
+        if matches!(
+            path.components().next(),
+            Some(Component::Normal(value)) if value == ".git" || value == "target"
+        ) {
+            return true;
+        }
+        matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".DS_Store")
+        ) || matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(value) if value == ".env" || (value.starts_with(".env.") && value != ".env.example")
+        )
     }
 
     #[test]
@@ -449,6 +586,14 @@ mod tests {
         assert!(validate_name("my-app-2").is_ok());
         assert!(validate_name("My App").is_err());
         assert!(validate_name("my--app").is_err());
+    }
+
+    #[test]
+    fn verifies_template_checksums() {
+        let digest = sha256_hex(b"template");
+        assert!(verify_checksum(b"template", &format!("{digest}  template.tar.gz")).is_ok());
+        assert!(verify_checksum(b"changed", &digest).is_err());
+        assert!(verify_checksum(b"template", "not-a-digest").is_err());
     }
 
     #[test]

@@ -57,9 +57,42 @@ jobs:
             art-*.tar.gz.sha256
           if-no-files-found: error
 
+  template:
+    name: Package fullstack-mono template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify tag matches the crate version
+        shell: bash
+        run: |
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "awesome-rust-templates") | .version')
+          test "${GITHUB_REF_NAME}" = "v${crate_version}"
+      - name: Package template and checksum
+        shell: bash
+        run: |
+          archive="fullstack-mono-${GITHUB_REF_NAME}.tar.gz"
+          tar \
+            --exclude='./.git' \
+            --exclude='./target' \
+            --exclude='./Cargo.lock' \
+            --exclude='./.DS_Store' \
+            --exclude='./.env' \
+            -czf "${archive}" \
+            -C templates/fullstack-mono .
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: template-fullstack-mono
+          path: |
+            fullstack-mono-*.tar.gz
+            fullstack-mono-*.tar.gz.sha256
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [build, template]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -72,6 +105,10 @@ jobs:
           pattern: art-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v5
+        with:
+          name: template-fullstack-mono
+          path: dist
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
