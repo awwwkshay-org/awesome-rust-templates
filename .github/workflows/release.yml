@@ -1,0 +1,78 @@
+name: Release art
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.1
+          targets: ${{ matrix.target }}
+      - name: Verify tag matches the crate version
+        shell: bash
+        run: |
+          crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "awesome-rust-templates") | .version')
+          test "${GITHUB_REF_NAME}" = "v${crate_version}"
+      - name: Build art
+        run: cargo build --locked --release --package awesome-rust-templates --bin art --target ${{ matrix.target }}
+      - name: Package binary and checksum
+        shell: bash
+        run: |
+          archive="art-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          staging="${archive%.tar.gz}"
+          mkdir "${staging}"
+          cp "target/${{ matrix.target }}/release/art" "${staging}/art"
+          tar -czf "${archive}" -C "${staging}" art
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: art-${{ matrix.target }}
+          path: |
+            art-*.tar.gz
+            art-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: art-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "art ${GITHUB_REF_NAME}"

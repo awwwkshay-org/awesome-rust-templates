@@ -1,0 +1,289 @@
+name: Publish & Propose Deployment
+
+# Published releases produce semver-tagged production images automatically.
+# A manual run produces an immutable SHA-tagged build and can optionally open
+# the configured GitOps deployment PR.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      propose_deployment:
+        description: Open or update the configured infrastructure repository PR
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Publish production images
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    outputs:
+      short_sha: ${{ steps.refs.outputs.short_sha }}
+      api_image: ${{ steps.names.outputs.api }}
+      ui_image: ${{ steps.names.outputs.ui }}
+      api_digest: ${{ steps.api-build.outputs.digest }}
+      ui_digest: ${{ steps.ui-build.outputs.digest }}
+      api_digest_ref: ${{ steps.refs.outputs.api_digest_ref }}
+      ui_digest_ref: ${{ steps.refs.outputs.ui_digest_ref }}
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up QEMU
+        if: contains(vars.IMAGE_PLATFORMS, ',')
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve lowercase image names
+        id: names
+        shell: bash
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "api=${REGISTRY}/${repository}-api" >> "${GITHUB_OUTPUT}"
+          echo "ui=${REGISTRY}/${repository}-ui" >> "${GITHUB_OUTPUT}"
+
+      - name: API image metadata
+        id: api-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.names.outputs.api }}
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }} API
+            org.opencontainers.image.description=Axum domain API
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+
+      - name: UI image metadata
+        id: ui-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.names.outputs.ui }}
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }} UI
+            org.opencontainers.image.description=Dioxus SSR server and hydrated web client
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+
+      - name: Build and push API image
+        id: api-build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          platforms: ${{ vars.IMAGE_PLATFORMS || 'linux/amd64' }}
+          push: true
+          tags: ${{ steps.api-meta.outputs.tags }}
+          labels: ${{ steps.api-meta.outputs.labels }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Build and push UI image
+        id: ui-build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/ui/Dockerfile
+          platforms: ${{ vars.IMAGE_PLATFORMS || 'linux/amd64' }}
+          push: true
+          tags: ${{ steps.ui-meta.outputs.tags }}
+          labels: ${{ steps.ui-meta.outputs.labels }}
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,scope=ui,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest API image
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.names.outputs.api }}
+          subject-digest: ${{ steps.api-build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest UI image
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.names.outputs.ui }}
+          subject-digest: ${{ steps.ui-build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record immutable image references
+        id: refs
+        env:
+          API_IMAGE: ${{ steps.names.outputs.api }}
+          UI_IMAGE: ${{ steps.names.outputs.ui }}
+          API_DIGEST: ${{ steps.api-build.outputs.digest }}
+          UI_DIGEST: ${{ steps.ui-build.outputs.digest }}
+        run: |
+          short_sha="${GITHUB_SHA::12}"
+          api_digest_ref="${API_IMAGE}@${API_DIGEST}"
+          ui_digest_ref="${UI_IMAGE}@${UI_DIGEST}"
+
+          {
+            echo "short_sha=${short_sha}"
+            echo "api_digest_ref=${api_digest_ref}"
+            echo "ui_digest_ref=${ui_digest_ref}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Published images"
+            echo
+            echo "| Component | Immutable reference |"
+            echo "| --- | --- |"
+            echo "| API | \`${api_digest_ref}\` |"
+            echo "| UI | \`${ui_digest_ref}\` |"
+            echo
+            echo "Both images include BuildKit provenance and SBOM attestations."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  propose:
+    name: Propose production deployment
+    needs: publish
+    if: >-
+      ${{ vars.INFRA_REPOSITORY != '' &&
+          vars.INFRA_KUSTOMIZE_DIR != '' &&
+          (github.event_name == 'release' || inputs.propose_deployment) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      INFRA_REPO: ${{ vars.INFRA_REPOSITORY }}
+      BASE_BRANCH: ${{ vars.INFRA_BASE_BRANCH || 'main' }}
+      KUSTOMIZE_DIR: ${{ vars.INFRA_KUSTOMIZE_DIR }}
+      API_KUSTOMIZE_NAME: ${{ vars.API_KUSTOMIZE_NAME || 'api' }}
+      UI_KUSTOMIZE_NAME: ${{ vars.UI_KUSTOMIZE_NAME || 'ui' }}
+      API_IMAGE: ${{ needs.publish.outputs.api_image }}
+      UI_IMAGE: ${{ needs.publish.outputs.ui_image }}
+      API_DIGEST: ${{ needs.publish.outputs.api_digest }}
+      UI_DIGEST: ${{ needs.publish.outputs.ui_digest }}
+      SHORT_SHA: ${{ needs.publish.outputs.short_sha }}
+
+    steps:
+      - name: Checkout infrastructure repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          ref: ${{ env.BASE_BRANCH }}
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: infra
+          persist-credentials: true
+
+      - name: Install kustomize
+        env:
+          KUSTOMIZE_VERSION: v5.4.3
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            --output "${RUNNER_TEMP}/kustomize.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/kustomize.tar.gz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+
+      - name: Pin image digests
+        working-directory: infra/${{ env.KUSTOMIZE_DIR }}
+        run: |
+          kustomize edit set image \
+            "${API_KUSTOMIZE_NAME}=${API_IMAGE}@${API_DIGEST}" \
+            "${UI_KUSTOMIZE_NAME}=${UI_IMAGE}@${UI_DIGEST}"
+          kustomize build . > /dev/null
+
+      - name: Detect manifest changes
+        id: diff
+        working-directory: infra
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Open or update deployment pull request
+        id: pr
+        if: steps.diff.outputs.changed == 'true'
+        working-directory: infra
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_REPO_TOKEN }}
+          API_DIGEST_REF: ${{ needs.publish.outputs.api_digest_ref }}
+          UI_DIGEST_REF: ${{ needs.publish.outputs.ui_digest_ref }}
+        run: |
+          branch="deploy/production-${SHORT_SHA}"
+          title="deploy(production): application ${SHORT_SHA}"
+          body_file="${RUNNER_TEMP}/deployment-pr.md"
+
+          git config user.name "release-bot[bot]"
+          git config user.email "release-bot@users.noreply.github.com"
+          git checkout -B "${branch}"
+          git add "${KUSTOMIZE_DIR}/kustomization.yaml"
+          git commit -m "${title}"
+
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null; then
+            git fetch origin "${branch}:refs/remotes/origin/${branch}"
+          fi
+          git push --force-with-lease --set-upstream origin "${branch}"
+
+          {
+            echo "Automated deployment proposal from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+            echo
+            echo "| Component | Immutable image |"
+            echo "| --- | --- |"
+            echo "| API | \`${API_DIGEST_REF}\` |"
+            echo "| UI | \`${UI_DIGEST_REF}\` |"
+            echo
+            echo "The workflow validated the rendered Kustomize manifests before opening this PR."
+          } > "${body_file}"
+
+          pr_url="$(gh pr list --repo "${INFRA_REPO}" --state open \
+            --base "${BASE_BRANCH}" --head "${branch}" --json url --jq '.[0].url')"
+
+          if [ -n "${pr_url}" ]; then
+            gh pr edit "${pr_url}" --repo "${INFRA_REPO}" \
+              --title "${title}" --body-file "${body_file}"
+          else
+            pr_url="$(gh pr create --repo "${INFRA_REPO}" --base "${BASE_BRANCH}" \
+              --head "${branch}" --title "${title}" --body-file "${body_file}")"
+          fi
+
+          echo "url=${pr_url}" >> "${GITHUB_OUTPUT}"
+          echo "Deployment PR: ${pr_url}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Report unchanged deployment
+        if: steps.diff.outputs.changed == 'false'
+        run: echo "Infrastructure already pins these image digests." >> "${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,19 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shared = { path = "../../packages/shared" }
+dioxus.workspace = true
+reqwest = { workspace = true, optional = true }
+serde.workspace = true
+uuid.workspace = true
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+server = ["dioxus/server", "dep:reqwest"]

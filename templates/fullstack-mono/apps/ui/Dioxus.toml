@@ -1,0 +1,21 @@
+[application]
+name = "fullstack-mono-template"
+default_platform = "web"
+
+[web.app]
+title = "Todo Template"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+script = []
+
+[bundle]
+identifier = "com.example.fullstack-mono-template"
+publisher = "Example"
