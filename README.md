@@ -18,7 +18,7 @@ Install the latest tagged version directly from GitHub:
 
 ```sh
 cargo install --git https://github.com/awwwkshay-org/awesome-rust-templates \
-  --tag v0.2.0 --locked --package awesome-rust-templates
+  --tag v0.3.0 --locked --package awesome-rust-templates
 ```
 
 This installs the `art` binary in Cargo's binary directory. Tagged GitHub
