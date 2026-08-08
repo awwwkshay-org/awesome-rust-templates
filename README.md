@@ -29,31 +29,41 @@ must still be installed when running the downloaded binary.
 You can also run the generator directly from this checkout:
 
 ```sh
-cargo run -p awesome-rust-templates --bin art -- --init . --template fullstack-mono
+cargo run -p awesome-rust-templates --bin art -- . --template fullstack-mono
 ```
 
 Or install it locally:
 
 ```sh
 cargo install --path tools/awesome-rust-templates --locked
-art --init . --template fullstack-mono
+art . --template fullstack-mono
 ```
 
 This initializes the full-stack template directly in the current directory. To
 create a named child directory instead, run:
 
 ```sh
-art --init --template fullstack-mono --name example-fullstack-mono
+art --template fullstack-mono --name example-fullstack-mono
 ```
 
 For an interactive setup, omit the remaining options:
 
 ```sh
-art --init
+art
 ```
 
 The CLI will show the available templates and ask for the project name and Git
 initialization preference.
+
+For a quick setup using all defaults, pass `--yes` (or `-y`):
+
+```sh
+art my-project --yes
+```
+
+When `DIRECTORY` is supplied, its final path component is also used as the
+project name. Pass `--name` when you want to create a named child directory or
+override that inferred name.
 
 The generator downloads the template asset matching its own version from the
 project's GitHub release, verifies its SHA-256 checksum, and caches it in the
@@ -61,8 +71,11 @@ operating system's standard cache directory. The first use requires network
 access; later projects using the same version work from the cache. After
 customizing the Cargo manifests, it runs `cargo generate-lockfile` so
 `Cargo.lock` always matches the generated package names and dependency
-declarations. Pass a path after `--init` to choose another directory, and use
-`--no-git` to skip Git initialization. Existing files are never overwritten.
+declarations. By default it initializes a Git repository on `main`, stages the
+generated project, and creates an `Initial commit` using your configured Git
+identity. Pass a directory as the positional argument, and use `--no-git` to
+skip Git initialization and the commit. The former `--init [DIRECTORY]` form
+remains available for compatibility. Existing files are never overwritten.
 
 ## Validate
 

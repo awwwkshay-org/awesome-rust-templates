@@ -38,15 +38,19 @@ impl Template {
     about = "Create projects from Awesome Rust Templates"
 )]
 struct Args {
-    /// Initialize a project in DIRECTORY (defaults to the current directory).
+    /// Directory in which to create the project.
+    #[arg(value_name = "DIRECTORY")]
+    directory: Option<PathBuf>,
+
+    /// Legacy alias for DIRECTORY.
     #[arg(
         long,
         value_name = "DIRECTORY",
         num_args = 0..=1,
         default_missing_value = ".",
-        required = true
+        conflicts_with = "directory"
     )]
-    init: PathBuf,
+    init: Option<PathBuf>,
 
     /// Template to use.
     #[arg(long, value_enum)]
@@ -56,9 +60,13 @@ struct Args {
     #[arg(long)]
     name: Option<String>,
 
-    /// Do not initialize a Git repository.
+    /// Do not initialize Git or create the initial commit.
     #[arg(long)]
     no_git: bool,
+
+    /// Accept defaults without prompting.
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 fn main() -> Result<()> {
@@ -71,7 +79,7 @@ fn main() -> Result<()> {
 fn create_from_args(args: &Args) -> Result<()> {
     let template = args
         .template
-        .context("a template is required; pass --template or run art --init interactively")?;
+        .context("a template is required; pass --template or run art interactively")?;
     let archive = load_template(template)?;
     create_from_args_with_archive(args, &archive, true)
 }
@@ -83,17 +91,19 @@ fn create_from_args_with_archive(
 ) -> Result<()> {
     let template = args
         .template
-        .context("a template is required; pass --template or run art --init interactively")?;
-    let project_name = args
-        .name
-        .as_deref()
-        .unwrap_or_else(|| template.default_project_name());
+        .context("a template is required; pass --template or run art interactively")?;
+    let project_name = project_name(args, template)?;
     validate_name(project_name)?;
 
+    let directory = args
+        .directory
+        .as_ref()
+        .or(args.init.as_ref())
+        .map_or_else(|| Path::new("."), PathBuf::as_path);
     let destination = args
         .name
         .as_ref()
-        .map_or_else(|| args.init.clone(), |name| args.init.join(name));
+        .map_or_else(|| directory.to_owned(), |name| directory.join(name));
     let destination_existed = destination.exists();
 
     if args.name.is_some() && destination_existed {
@@ -119,12 +129,45 @@ fn create_from_args_with_archive(
         return Err(error);
     }
 
-    println!("Created {project_name} at {}", destination.display());
-    println!(
-        "Next: cd {} && docker compose up --build",
-        destination.display()
-    );
+    println!("\nCreated {project_name} at {}", destination.display());
+    if !args.no_git {
+        println!("Git initialized on main with Initial commit");
+    }
+    println!("\nNext steps:");
+    if destination != Path::new(".") {
+        println!("  cd {}", shell_quote(&destination));
+    }
+    println!("  docker compose --profile apps up --build");
     Ok(())
+}
+
+fn project_name(args: &Args, template: Template) -> Result<&str> {
+    if let Some(name) = args.name.as_deref() {
+        return Ok(name);
+    }
+    if let Some(directory) = args
+        .directory
+        .as_deref()
+        .filter(|directory| *directory != Path::new("."))
+    {
+        return directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("DIRECTORY must end with a valid UTF-8 project name; use --name to set one");
+    }
+    Ok(template.default_project_name())
+}
+
+fn shell_quote(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    {
+        value.into_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn load_template(template: Template) -> Result<Vec<u8>> {
@@ -214,6 +257,11 @@ fn resolve_args<R: BufRead, W: Write>(
         return Ok(args);
     }
 
+    if args.yes {
+        args.template = Some(Template::FullstackMono);
+        return Ok(args);
+    }
+
     writeln!(output, "Choose a template:")?;
     writeln!(output, "  1) fullstack-mono")?;
     loop {
@@ -227,27 +275,38 @@ fn resolve_args<R: BufRead, W: Write>(
         }
     }
 
-    loop {
-        let name = prompt(
-            input,
-            output,
-            "Project name (leave blank to initialize the target directory): ",
-        )?;
-        if name.is_empty() {
-            break;
-        }
-        match validate_name(&name) {
-            Ok(()) => {
-                args.name = Some(name);
+    if args.name.is_none()
+        && args
+            .directory
+            .as_deref()
+            .is_none_or(|directory| directory == Path::new("."))
+    {
+        loop {
+            let name = prompt(
+                input,
+                output,
+                "Project name (leave blank to initialize the target directory): ",
+            )?;
+            if name.is_empty() {
                 break;
             }
-            Err(error) => writeln!(output, "{error}")?,
+            match validate_name(&name) {
+                Ok(()) => {
+                    args.name = Some(name);
+                    break;
+                }
+                Err(error) => writeln!(output, "{error}")?,
+            }
         }
     }
 
     if !args.no_git {
         loop {
-            let initialize_git = prompt(input, output, "Initialize a Git repository? [Y/n]: ")?;
+            let initialize_git = prompt(
+                input,
+                output,
+                "Initialize Git on main and create the initial commit? [Y/n]: ",
+            )?;
             match initialize_git.to_ascii_lowercase().as_str() {
                 "" | "y" | "yes" => break,
                 "n" | "no" => {
@@ -266,7 +325,9 @@ fn prompt<R: BufRead, W: Write>(input: &mut R, output: &mut W, message: &str) ->
     write!(output, "{message}")?;
     output.flush()?;
     let mut answer = String::new();
-    input.read_line(&mut answer)?;
+    if input.read_line(&mut answer)? == 0 {
+        bail!("interactive input ended; rerun with --yes or provide --template");
+    }
     Ok(answer.trim().to_owned())
 }
 
@@ -278,6 +339,12 @@ fn scaffold(
     should_generate_lockfile: bool,
 ) -> Result<()> {
     ensure_no_conflicts(name, destination, template)?;
+    if initialize_git && destination.join(".git").exists() {
+        bail!(
+            "destination already contains a Git repository: {}; use --no-git to leave it unchanged",
+            destination.display()
+        );
+    }
 
     let decoder = GzDecoder::new(Cursor::new(template));
     tar::Archive::new(decoder)
@@ -327,6 +394,7 @@ fn customize(name: &str, root: &Path) -> Result<()> {
     let title = human_title(name);
     let database = name.replace('-', "_");
     let api_name = format!("{name}-api");
+    let api_crate = api_name.replace('-', "_");
     let ui_name = format!("{name}-ui");
     let shared_name = format!("{name}-shared");
     for (path, from, to) in [
@@ -342,8 +410,36 @@ fn customize(name: &str, root: &Path) -> Result<()> {
         ),
         ("apps/ui/Dioxus.toml", "Todo Template", title.clone()),
         ("apps/ui/src/main.rs", "Todo Template", title),
-        ("docker-compose.yml", "app_test", format!("{database}_test")),
-        ("docker-compose.yml", "app", database.clone()),
+        (
+            "docker-compose.yml",
+            "POSTGRES_DB: app_test",
+            format!("POSTGRES_DB: {database}_test"),
+        ),
+        (
+            "docker-compose.yml",
+            "postgres:5432/app_test",
+            format!("postgres:5432/{database}_test"),
+        ),
+        (
+            "docker-compose.yml",
+            "pg_isready -U postgres -d app_test",
+            format!("pg_isready -U postgres -d {database}_test"),
+        ),
+        (
+            "docker-compose.yml",
+            "POSTGRES_DB: app",
+            format!("POSTGRES_DB: {database}"),
+        ),
+        (
+            "docker-compose.yml",
+            "postgres:5432/app",
+            format!("postgres:5432/{database}"),
+        ),
+        (
+            "docker-compose.yml",
+            "pg_isready -U postgres -d app",
+            format!("pg_isready -U postgres -d {database}"),
+        ),
         ("apps/api/.env.example", "/app", format!("/{database}")),
         ("docs/deployment.md", "template-api", format!("{name}-api")),
         ("docs/deployment.md", "template-ui", format!("{name}-ui")),
@@ -355,9 +451,15 @@ fn customize(name: &str, root: &Path) -> Result<()> {
         ("apps/api".to_owned(), format!("apps/{api_name}")),
         ("apps/ui".to_owned(), format!("apps/{ui_name}")),
         (
+            "localhost:5432/app".to_owned(),
+            format!("localhost:5432/{database}"),
+        ),
+        (
             "name = \"api\"".to_owned(),
             format!("name = \"{api_name}\""),
         ),
+        ("use api::{".to_owned(), format!("use {api_crate}::{{")),
+        ("api=".to_owned(), format!("{api_crate}=")),
         ("name = \"ui\"".to_owned(), format!("name = \"{ui_name}\"")),
         (
             "name = \"shared\"".to_owned(),
@@ -430,15 +532,48 @@ fn replace(path: &Path, from: &str, to: &str) -> Result<()> {
 }
 
 fn init_git(root: &Path) -> Result<()> {
-    let status = Command::new("git")
-        .args(["init", "--initial-branch=main"])
+    init_git_with_identity(root, None)
+}
+
+fn init_git_with_identity(root: &Path, identity: Option<(&str, &str)>) -> Result<()> {
+    let output = Command::new("git")
+        .args(["init", "--quiet", "--initial-branch=main"])
         .current_dir(root)
-        .status()
+        .output()
         .context("Git is unavailable; use --no-git to skip initialization")?;
-    if !status.success() {
-        bail!("git init failed; use --no-git to skip initialization");
+    ensure_git_succeeded(output, "init")?;
+
+    let output = Command::new("git")
+        .args(["add", "--all"])
+        .current_dir(root)
+        .output()
+        .context("Git is unavailable; use --no-git to skip initialization")?;
+    ensure_git_succeeded(output, "add")?;
+
+    let mut commit = Command::new("git");
+    if let Some((name, email)) = identity {
+        commit
+            .arg("-c")
+            .arg(format!("user.name={name}"))
+            .arg("-c")
+            .arg(format!("user.email={email}"));
     }
-    Ok(())
+    let output = commit
+        .args(["commit", "--quiet", "--message", "Initial commit"])
+        .current_dir(root)
+        .output()
+        .context("Git is unavailable; use --no-git to skip initialization")?;
+    ensure_git_succeeded(output, "commit").context(
+        "configure Git user.name and user.email, or use --no-git to skip the initial commit",
+    )
+}
+
+fn ensure_git_succeeded(output: std::process::Output, operation: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!("git {operation} failed: {}", stderr.trim())
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -485,10 +620,12 @@ mod tests {
 
     fn args(init: PathBuf, name: Option<&str>) -> Args {
         Args {
-            init,
+            directory: None,
+            init: Some(init),
             template: Some(Template::FullstackMono),
             name: name.map(str::to_owned),
             no_git: true,
+            yes: false,
         }
     }
 
@@ -544,10 +681,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_both_supported_command_shapes() {
-        let current =
-            Args::try_parse_from(["art", "--init", ".", "--template", "fullstack-mono"]).unwrap();
-        assert_eq!(current.init, PathBuf::from("."));
+    fn parses_current_and_legacy_command_shapes() {
+        let current = Args::try_parse_from(["art", ".", "--template", "fullstack-mono"]).unwrap();
+        assert_eq!(current.directory, Some(PathBuf::from(".")));
         assert!(matches!(current.template, Some(Template::FullstackMono)));
         assert!(current.name.is_none());
 
@@ -560,13 +696,13 @@ mod tests {
             "example-fullstack-mono",
         ])
         .unwrap();
-        assert_eq!(named.init, PathBuf::from("."));
+        assert_eq!(named.init, Some(PathBuf::from(".")));
         assert_eq!(named.name.as_deref(), Some("example-fullstack-mono"));
     }
 
     #[test]
     fn prompts_for_missing_options() {
-        let parsed = Args::try_parse_from(["art", "--init"]).unwrap();
+        let parsed = Args::try_parse_from(["art"]).unwrap();
         let mut answers = Cursor::new(b"1\nfinsnap\nn\n");
         let mut output = Vec::new();
 
@@ -578,7 +714,57 @@ mod tests {
         let transcript = String::from_utf8(output).unwrap();
         assert!(transcript.contains("Choose a template"));
         assert!(transcript.contains("Project name"));
-        assert!(transcript.contains("Initialize a Git repository"));
+        assert!(transcript.contains("Initialize Git on main"));
+    }
+
+    #[test]
+    fn accepts_defaults_without_prompting() {
+        let parsed = Args::try_parse_from(["art", "projects", "--yes"]).unwrap();
+        let mut answers = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        let resolved = resolve_args(parsed, &mut answers, &mut output).unwrap();
+
+        assert!(matches!(resolved.template, Some(Template::FullstackMono)));
+        assert_eq!(resolved.directory, Some(PathBuf::from("projects")));
+        assert!(!resolved.no_git);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn reports_closed_interactive_input() {
+        let parsed = Args::try_parse_from(["art"]).unwrap();
+        let mut answers = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        let error = resolve_args(parsed, &mut answers, &mut output).unwrap_err();
+
+        assert!(error.to_string().contains("rerun with --yes"));
+    }
+
+    #[test]
+    fn infers_the_project_name_from_a_positional_directory() {
+        let parsed = Args::try_parse_from(["art", "projects/invoice-box", "--yes"]).unwrap();
+        assert_eq!(
+            project_name(&parsed, Template::FullstackMono).unwrap(),
+            "invoice-box"
+        );
+
+        let current = Args::try_parse_from(["art", ".", "--yes"]).unwrap();
+        assert_eq!(
+            project_name(&current, Template::FullstackMono).unwrap(),
+            "fullstack-mono"
+        );
+    }
+
+    #[test]
+    fn quotes_paths_for_the_shell() {
+        assert_eq!(shell_quote(Path::new("my-project")), "my-project");
+        assert_eq!(
+            shell_quote(Path::new("my projects/app")),
+            "'my projects/app'"
+        );
+        assert_eq!(shell_quote(Path::new("it's-here")), "'it'\\''s-here'");
     }
 
     #[test]
@@ -624,8 +810,26 @@ mod tests {
         assert!(!project.join("apps/api").exists());
         assert!(!project.join("apps/ui").exists());
         assert!(project.join(".github/workflows/ci.yml").is_file());
+        assert!(project.join("AGENTS.md").is_file());
+        assert!(
+            project
+                .join(".agents/skills/implement-fullstack-feature/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            project
+                .join(".agents/skills/openspec-propose/SKILL.md")
+                .is_file()
+        );
+        assert!(project.join("openspec/config.yaml").is_file());
+        assert!(
+            project
+                .join("openspec/specs/todo-management/spec.md")
+                .is_file()
+        );
         assert!(!project.join("target").exists());
         assert!(!project.join("tools").exists());
+        assert!(!project.join(".git").exists());
 
         let dioxus = fs::read_to_string(project.join("apps/invoice-box-ui/Dioxus.toml")).unwrap();
         assert!(dioxus.contains("name = \"invoice-box-ui\""));
@@ -638,12 +842,39 @@ mod tests {
             fs::read_to_string(project.join("apps/invoice-box-api/Cargo.toml")).unwrap();
         assert!(api_manifest.contains("name = \"invoice-box-api\""));
         assert!(api_manifest.contains("package = \"invoice-box-shared\""));
+        let api_main =
+            fs::read_to_string(project.join("apps/invoice-box-api/src/main.rs")).unwrap();
+        assert!(api_main.contains("use invoice_box_api::{AppState, app};"));
+        assert!(api_main.contains("invoice_box_api=info,tower_http=info"));
+        assert!(!api_main.contains("use api::{"));
         let ui_manifest =
             fs::read_to_string(project.join("apps/invoice-box-ui/Cargo.toml")).unwrap();
         assert!(ui_manifest.contains("name = \"invoice-box-ui\""));
         let shared_manifest =
             fs::read_to_string(project.join("packages/shared/Cargo.toml")).unwrap();
         assert!(shared_manifest.contains("name = \"invoice-box-shared\""));
+
+        let compose = fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+        assert!(compose.contains("dockerfile: apps/invoice-box-api/Dockerfile"));
+        assert!(compose.contains("dockerfile: apps/invoice-box-ui/Dockerfile"));
+        assert!(compose.contains("working_dir: /app"));
+        assert!(compose.contains("- .:/app"));
+        assert!(compose.contains("POSTGRES_DB: invoice_box"));
+        assert!(compose.contains("POSTGRES_DB: invoice_box_test"));
+        assert!(compose.contains("RUST_LOG: invoice_box_api=info,tower_http=info"));
+        assert!(!compose.contains("invoice_boxs/"));
+
+        let agent_instructions = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+        assert!(agent_instructions.contains("apps/invoice-box-api"));
+        assert!(agent_instructions.contains("apps/invoice-box-ui"));
+        let openspec_config = fs::read_to_string(project.join("openspec/config.yaml")).unwrap();
+        assert!(openspec_config.contains("apps/invoice-box-api"));
+        assert!(openspec_config.contains("apps/invoice-box-ui"));
+        let validation_skill =
+            fs::read_to_string(project.join(".agents/skills/validate-fullstack-project/SKILL.md"))
+                .unwrap();
+        assert!(validation_skill.contains("localhost:5432/invoice_box"));
+        assert!(validation_skill.contains("-p invoice-box-ui"));
         assert!(!project.join("Cargo.lock").exists());
     }
 
@@ -658,5 +889,50 @@ mod tests {
             fs::read_to_string(temporary.path().join("README.md")).unwrap(),
             "keep me"
         );
+    }
+
+    #[test]
+    fn initializes_main_with_an_initial_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(temporary.path().join("README.md"), "# Example\n").unwrap();
+
+        init_git_with_identity(
+            temporary.path(),
+            Some(("Awesome Rust Templates", "art@example.invalid")),
+        )
+        .unwrap();
+
+        let branch = git_output(temporary.path(), &["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "main");
+        let subject = git_output(temporary.path(), &["log", "-1", "--pretty=%s"]);
+        assert_eq!(subject.trim(), "Initial commit");
+        assert!(git_output(temporary.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    fn git_output(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn refuses_to_commit_into_an_existing_repository() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir(temporary.path().join(".git")).unwrap();
+        let mut with_git = args(temporary.path().to_owned(), None);
+        with_git.no_git = false;
+
+        let error = create_without_lockfile(&with_git).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("already contains a Git repository")
+        );
+        assert!(!temporary.path().join("README.md").exists());
     }
 }

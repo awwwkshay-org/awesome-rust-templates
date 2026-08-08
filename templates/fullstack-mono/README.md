@@ -64,7 +64,7 @@ SERVER_URL=http://192.168.1.10:8080 dx serve --ios
 Build and start PostgreSQL, the API, and the web UI:
 
 ```sh
-docker compose up --build
+docker compose --profile apps up --build
 ```
 
 Open <http://localhost:8080>. The Dioxus server renders HTML, serves the hydrated
@@ -93,6 +93,31 @@ cargo clippy --locked -p ui --no-default-features --features web --target wasm32
 3. Replace the example migration with your first schema before publishing a new app.
 4. Keep transport-safe request/response types in `packages/shared` so the UI server, native clients, and API stay aligned.
 5. Add authentication, tracing exporters, and deployment manifests when the app requires them.
+
+## AI coding agents
+
+The repository includes vendor-neutral instructions in [`AGENTS.md`](AGENTS.md)
+and portable [Agent Skills](https://agentskills.io) under `.agents/skills/`.
+Agents that support these open conventions discover them automatically. Other
+agents can read `AGENTS.md`, which indexes each skill and explains when to load
+it.
+
+### Spec-driven development with OpenSpec
+
+The template is initialized with the OpenSpec `spec-driven` schema, project
+context, baseline capability specs, and vendor-neutral workflow skills. OpenSpec
+requires Node.js 20.19 or newer:
+
+```sh
+npm install -g @fission-ai/openspec@latest
+openspec list
+```
+
+Start a behavioral or architectural change with `/openspec-propose "your idea"`
+in agents that expose skill commands, or ask another agent to use the
+`openspec-propose` skill. Review the generated proposal, design, spec deltas, and
+tasks before using `openspec-apply-change` to implement them. Run
+`openspec update` after upgrading the CLI to refresh the managed workflow skills.
 
 ## Documentation
 

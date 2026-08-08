@@ -1,0 +1,40 @@
+schema: spec-driven
+
+context: |
+  Rust 2024 full-stack monorepo using Axum, Dioxus 0.7, PostgreSQL, and SQLx.
+  apps/api owns domain behavior, HTTP routes, persistence, and migrations.
+  apps/ui owns presentation, SSR, hydration, native clients, and a small
+  server-function BFF. packages/shared contains only serialized HTTP contracts
+  and small domain value types. The UI never depends on the API crate.
+  Preserve separate Dioxus server and wasm32 web builds. Use forward-only SQL
+  migrations after a migration has reached a shared environment. Cargo.lock is
+  committed and CI treats warnings as errors. Read AGENTS.md and
+  docs/architecture.md for the complete project rules.
+
+rules:
+  proposal:
+    - State the user-visible outcome, scope, and explicit non-goals.
+    - Identify affected runtime boundaries and compatibility or rollout risks.
+    - Call out public contract, database, configuration, and deployment changes.
+  specs:
+    - Write observable requirements using SHALL and concrete WHEN/THEN scenarios.
+    - Cover success, validation, error, and not-found behavior when applicable.
+    - Avoid implementation details unless they are externally required constraints.
+  design:
+    - Explain placement across shared contracts, API, database, UI server, and client.
+    - Address SSR and hydration, migration rollout, and failure handling when relevant.
+    - Record alternatives for new dependencies or changes to architecture boundaries.
+  tasks:
+    - Order work as a vertical slice and keep each task independently verifiable.
+    - Include focused tests and the relevant CI-equivalent validation commands.
+    - Include documentation and example configuration updates when behavior changes.
+
+operations:
+  apply:
+    guidance:
+      - Load the matching project skill under .agents/skills before implementation.
+      - Implement only approved scope and update each task checkbox after validation.
+  archive:
+    guidance:
+      - Confirm implementation matches the final artifacts and relevant checks passed.
+      - Sync delta specs before archiving unless the user explicitly declines.
