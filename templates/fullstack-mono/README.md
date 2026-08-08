@@ -64,7 +64,7 @@ SERVER_URL=http://192.168.1.10:8080 dx serve --ios
 Build and start PostgreSQL, the API, and the web UI:
 
 ```sh
-docker compose up --build
+docker compose --profile apps up --build
 ```
 
 Open <http://localhost:8080>. The Dioxus server renders HTML, serves the hydrated

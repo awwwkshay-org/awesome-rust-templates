@@ -13,7 +13,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "api=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "api=info,tower_http=info".into()),
         )
         .init();
 
@@ -40,7 +40,8 @@ async fn main() {
         .await
         .expect("failed to bind API listener");
 
-    tracing::info!(%address, "API listening");
+    let url = format!("http://{address}");
+    tracing::info!(%address, %url, "server started on {url}");
     axum::serve(listener, app(AppState::new(db)))
         .with_graceful_shutdown(shutdown_signal())
         .await

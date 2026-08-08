@@ -29,7 +29,7 @@ frontend assets, or hydration.
 ## Local stack
 
 ```sh
-docker compose up --build
+docker compose --profile apps up --build
 ```
 
 Compose persists development data in the `postgres-data` volume. To stop the
