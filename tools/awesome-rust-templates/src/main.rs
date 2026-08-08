@@ -60,7 +60,7 @@ struct Args {
     #[arg(long)]
     name: Option<String>,
 
-    /// Do not initialize a Git repository.
+    /// Do not initialize Git or create the initial commit.
     #[arg(long)]
     no_git: bool,
 
@@ -130,6 +130,9 @@ fn create_from_args_with_archive(
     }
 
     println!("\nCreated {project_name} at {}", destination.display());
+    if !args.no_git {
+        println!("Git initialized on main with Initial commit");
+    }
     println!("\nNext steps:");
     if destination != Path::new(".") {
         println!("  cd {}", shell_quote(&destination));
@@ -299,7 +302,11 @@ fn resolve_args<R: BufRead, W: Write>(
 
     if !args.no_git {
         loop {
-            let initialize_git = prompt(input, output, "Initialize a Git repository? [Y/n]: ")?;
+            let initialize_git = prompt(
+                input,
+                output,
+                "Initialize Git on main and create the initial commit? [Y/n]: ",
+            )?;
             match initialize_git.to_ascii_lowercase().as_str() {
                 "" | "y" | "yes" => break,
                 "n" | "no" => {
@@ -332,6 +339,12 @@ fn scaffold(
     should_generate_lockfile: bool,
 ) -> Result<()> {
     ensure_no_conflicts(name, destination, template)?;
+    if initialize_git && destination.join(".git").exists() {
+        bail!(
+            "destination already contains a Git repository: {}; use --no-git to leave it unchanged",
+            destination.display()
+        );
+    }
 
     let decoder = GzDecoder::new(Cursor::new(template));
     tar::Archive::new(decoder)
@@ -519,15 +532,48 @@ fn replace(path: &Path, from: &str, to: &str) -> Result<()> {
 }
 
 fn init_git(root: &Path) -> Result<()> {
-    let status = Command::new("git")
-        .args(["init", "--initial-branch=main"])
+    init_git_with_identity(root, None)
+}
+
+fn init_git_with_identity(root: &Path, identity: Option<(&str, &str)>) -> Result<()> {
+    let output = Command::new("git")
+        .args(["init", "--quiet", "--initial-branch=main"])
         .current_dir(root)
-        .status()
+        .output()
         .context("Git is unavailable; use --no-git to skip initialization")?;
-    if !status.success() {
-        bail!("git init failed; use --no-git to skip initialization");
+    ensure_git_succeeded(output, "init")?;
+
+    let output = Command::new("git")
+        .args(["add", "--all"])
+        .current_dir(root)
+        .output()
+        .context("Git is unavailable; use --no-git to skip initialization")?;
+    ensure_git_succeeded(output, "add")?;
+
+    let mut commit = Command::new("git");
+    if let Some((name, email)) = identity {
+        commit
+            .arg("-c")
+            .arg(format!("user.name={name}"))
+            .arg("-c")
+            .arg(format!("user.email={email}"));
     }
-    Ok(())
+    let output = commit
+        .args(["commit", "--quiet", "--message", "Initial commit"])
+        .current_dir(root)
+        .output()
+        .context("Git is unavailable; use --no-git to skip initialization")?;
+    ensure_git_succeeded(output, "commit").context(
+        "configure Git user.name and user.email, or use --no-git to skip the initial commit",
+    )
+}
+
+fn ensure_git_succeeded(output: std::process::Output, operation: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!("git {operation} failed: {}", stderr.trim())
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -668,7 +714,7 @@ mod tests {
         let transcript = String::from_utf8(output).unwrap();
         assert!(transcript.contains("Choose a template"));
         assert!(transcript.contains("Project name"));
-        assert!(transcript.contains("Initialize a Git repository"));
+        assert!(transcript.contains("Initialize Git on main"));
     }
 
     #[test]
@@ -783,6 +829,7 @@ mod tests {
         );
         assert!(!project.join("target").exists());
         assert!(!project.join("tools").exists());
+        assert!(!project.join(".git").exists());
 
         let dioxus = fs::read_to_string(project.join("apps/invoice-box-ui/Dioxus.toml")).unwrap();
         assert!(dioxus.contains("name = \"invoice-box-ui\""));
@@ -842,5 +889,50 @@ mod tests {
             fs::read_to_string(temporary.path().join("README.md")).unwrap(),
             "keep me"
         );
+    }
+
+    #[test]
+    fn initializes_main_with_an_initial_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::write(temporary.path().join("README.md"), "# Example\n").unwrap();
+
+        init_git_with_identity(
+            temporary.path(),
+            Some(("Awesome Rust Templates", "art@example.invalid")),
+        )
+        .unwrap();
+
+        let branch = git_output(temporary.path(), &["branch", "--show-current"]);
+        assert_eq!(branch.trim(), "main");
+        let subject = git_output(temporary.path(), &["log", "-1", "--pretty=%s"]);
+        assert_eq!(subject.trim(), "Initial commit");
+        assert!(git_output(temporary.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    fn git_output(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn refuses_to_commit_into_an_existing_repository() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::create_dir(temporary.path().join(".git")).unwrap();
+        let mut with_git = args(temporary.path().to_owned(), None);
+        with_git.no_git = false;
+
+        let error = create_without_lockfile(&with_git).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("already contains a Git repository")
+        );
+        assert!(!temporary.path().join("README.md").exists());
     }
 }

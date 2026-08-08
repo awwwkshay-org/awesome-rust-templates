@@ -71,9 +71,11 @@ operating system's standard cache directory. The first use requires network
 access; later projects using the same version work from the cache. After
 customizing the Cargo manifests, it runs `cargo generate-lockfile` so
 `Cargo.lock` always matches the generated package names and dependency
-declarations. Pass a directory as the positional argument, and use `--no-git`
-to skip Git initialization. The former `--init [DIRECTORY]` form remains
-available for compatibility. Existing files are never overwritten.
+declarations. By default it initializes a Git repository on `main`, stages the
+generated project, and creates an `Initial commit` using your configured Git
+identity. Pass a directory as the positional argument, and use `--no-git` to
+skip Git initialization and the commit. The former `--init [DIRECTORY]` form
+remains available for compatibility. Existing files are never overwritten.
 
 ## Validate
 
