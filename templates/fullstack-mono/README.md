@@ -94,6 +94,31 @@ cargo clippy --locked -p ui --no-default-features --features web --target wasm32
 4. Keep transport-safe request/response types in `packages/shared` so the UI server, native clients, and API stay aligned.
 5. Add authentication, tracing exporters, and deployment manifests when the app requires them.
 
+## AI coding agents
+
+The repository includes vendor-neutral instructions in [`AGENTS.md`](AGENTS.md)
+and portable [Agent Skills](https://agentskills.io) under `.agents/skills/`.
+Agents that support these open conventions discover them automatically. Other
+agents can read `AGENTS.md`, which indexes each skill and explains when to load
+it.
+
+### Spec-driven development with OpenSpec
+
+The template is initialized with the OpenSpec `spec-driven` schema, project
+context, baseline capability specs, and vendor-neutral workflow skills. OpenSpec
+requires Node.js 20.19 or newer:
+
+```sh
+npm install -g @fission-ai/openspec@latest
+openspec list
+```
+
+Start a behavioral or architectural change with `/openspec-propose "your idea"`
+in agents that expose skill commands, or ask another agent to use the
+`openspec-propose` skill. Review the generated proposal, design, spec deltas, and
+tasks before using `openspec-apply-change` to implement them. Run
+`openspec update` after upgrading the CLI to refresh the managed workflow skills.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): boundaries and dependency rules

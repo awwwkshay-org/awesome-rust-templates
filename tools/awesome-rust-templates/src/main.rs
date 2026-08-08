@@ -438,6 +438,10 @@ fn customize(name: &str, root: &Path) -> Result<()> {
         ("apps/api".to_owned(), format!("apps/{api_name}")),
         ("apps/ui".to_owned(), format!("apps/{ui_name}")),
         (
+            "localhost:5432/app".to_owned(),
+            format!("localhost:5432/{database}"),
+        ),
+        (
             "name = \"api\"".to_owned(),
             format!("name = \"{api_name}\""),
         ),
@@ -760,6 +764,23 @@ mod tests {
         assert!(!project.join("apps/api").exists());
         assert!(!project.join("apps/ui").exists());
         assert!(project.join(".github/workflows/ci.yml").is_file());
+        assert!(project.join("AGENTS.md").is_file());
+        assert!(
+            project
+                .join(".agents/skills/implement-fullstack-feature/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            project
+                .join(".agents/skills/openspec-propose/SKILL.md")
+                .is_file()
+        );
+        assert!(project.join("openspec/config.yaml").is_file());
+        assert!(
+            project
+                .join("openspec/specs/todo-management/spec.md")
+                .is_file()
+        );
         assert!(!project.join("target").exists());
         assert!(!project.join("tools").exists());
 
@@ -795,6 +816,18 @@ mod tests {
         assert!(compose.contains("POSTGRES_DB: invoice_box_test"));
         assert!(compose.contains("RUST_LOG: invoice_box_api=info,tower_http=info"));
         assert!(!compose.contains("invoice_boxs/"));
+
+        let agent_instructions = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+        assert!(agent_instructions.contains("apps/invoice-box-api"));
+        assert!(agent_instructions.contains("apps/invoice-box-ui"));
+        let openspec_config = fs::read_to_string(project.join("openspec/config.yaml")).unwrap();
+        assert!(openspec_config.contains("apps/invoice-box-api"));
+        assert!(openspec_config.contains("apps/invoice-box-ui"));
+        let validation_skill =
+            fs::read_to_string(project.join(".agents/skills/validate-fullstack-project/SKILL.md"))
+                .unwrap();
+        assert!(validation_skill.contains("localhost:5432/invoice_box"));
+        assert!(validation_skill.contains("-p invoice-box-ui"));
         assert!(!project.join("Cargo.lock").exists());
     }
 
