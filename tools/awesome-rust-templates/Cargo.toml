@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-dirs = "6"
+dirs = "7"
 flate2 = "1"
 sha2 = "0.11"
 tar = "0.4"
